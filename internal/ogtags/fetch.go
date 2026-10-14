@@ -60,6 +60,13 @@ func (c *OGTagCache) fetchHTMLDocumentWithCache(ctx context.Context, urlStr stri
 			slog.DebugContext(ctx, "og: request timed out", "url", urlStr)
 			// Cache empty result for half the TTL to not spam the server, errors don't matter
 			_ = c.cache.Set(ctx, cacheKey, emptyMap, c.ogTimeToLive/2)
+			return nil, fmt.Errorf("%w: request timed out: %w", ErrOgHandled, err)
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// The challenge page renders fine without OG tags; a client that
+			// went away is not worth an error log line.
+			slog.DebugContext(ctx, "og: request aborted", "url", urlStr, "error", err)
+			return nil, fmt.Errorf("%w: %w", ErrOgHandled, err)
 		}
 		return nil, fmt.Errorf("http get failed: %w", err)
 	}
@@ -82,7 +89,8 @@ func (c *OGTagCache) fetchHTMLDocumentWithCache(ctx context.Context, urlStr stri
 	// Check content type
 	ct := resp.Header.Get("Content-Type")
 	if ct == "" {
-		return nil, fmt.Errorf("missing Content-Type header")
+		slog.DebugContext(ctx, "og: missing Content-Type header", "url", urlStr)
+		return nil, fmt.Errorf("%w: missing Content-Type header", ErrOgHandled)
 	} else {
 		mediaType, _, err := mime.ParseMediaType(ct)
 		if err != nil {
@@ -104,9 +112,10 @@ func (c *OGTagCache) fetchHTMLDocumentWithCache(ctx context.Context, urlStr stri
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
 			slog.DebugContext(ctx, "og: content exceeded max length", "url", urlStr, "limit", maxContentLength)
-			return nil, fmt.Errorf("content too large: exceeded %d bytes", maxContentLength)
+			return nil, fmt.Errorf("%w: content too large: exceeded %d bytes", ErrOgHandled, maxContentLength)
 		}
-		return nil, fmt.Errorf("failed to parse HTML: %w", err)
+		slog.DebugContext(ctx, "og: failed to parse HTML", "url", urlStr, "error", err)
+		return nil, fmt.Errorf("%w: failed to parse HTML: %w", ErrOgHandled, err)
 	}
 
 	return doc, nil

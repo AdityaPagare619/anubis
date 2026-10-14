@@ -1,11 +1,15 @@
 package ogtags
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -296,4 +300,101 @@ func TestGetOGTagsWithHostConsideration(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestGetOGTagsBenignFetchFailures pins the behavior behind
+// https://github.com/TecharoHQ/anubis/issues/1981: fetch failures that are
+// expected in production (slow backends, huge pages, missing Content-Type,
+// aborted requests) must not surface as errors from GetOGTags, because the
+// challenge page renders fine with ogTags=nil and RenderIndex logs every
+// returned error at ERROR.
+func TestGetOGTagsBenignFetchFailures(t *testing.T) {
+	// newCache builds a cache whose fetch target is the test server; the
+	// request URL path is appended to it by getTarget.
+	newCache := func(t *testing.T, target string) *OGTagCache {
+		return NewOGTagCache(target, config.OpenGraph{
+			Enabled:      true,
+			TimeToLive:   time.Minute,
+			ConsiderHost: false,
+		}, memory.New(t.Context()), TargetOptions{})
+	}
+
+	fetchOK := func(t *testing.T, ts *httptest.Server, ctx context.Context) {
+		t.Helper()
+		u, err := url.Parse(ts.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tags, err := newCache(t, ts.URL).GetOGTags(ctx, u, "")
+		if err != nil {
+			t.Errorf("benign failure returned an error: %v", err)
+		}
+		if tags != nil {
+			t.Errorf("expected nil tags, got %v", tags)
+		}
+	}
+
+	t.Run("missing Content-Type", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// hijack so the response carries no Content-Type at all
+			// (net/http would otherwise sniff one)
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				t.Error("server does not support hijacking")
+				return
+			}
+			conn, bufrw, err := hj.Hijack()
+			if err != nil {
+				t.Errorf("hijack: %v", err)
+				return
+			}
+			defer conn.Close() //nolint:errcheck
+			body := "<html><head></head><body>no content type</body></html>"
+			fmt.Fprintf(bufrw, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body) //nolint:errcheck
+			bufrw.Flush()                                                                                               //nolint:errcheck
+		}))
+		defer ts.Close()
+
+		fetchOK(t, ts, t.Context())
+	})
+
+	t.Run("oversized body", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			// 9 MiB > maxContentLength (8 MiB)
+			chunk := strings.Repeat("x", 1<<20)
+			for i := 0; i < 9; i++ {
+				if _, err := io.WriteString(w, chunk); err != nil {
+					return
+				}
+			}
+		}))
+		defer ts.Close()
+
+		fetchOK(t, ts, t.Context())
+	})
+
+	t.Run("client disconnect (context canceled)", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			w.Write([]byte("<html></html>")) //nolint:errcheck
+		}))
+		defer ts.Close()
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel() // simulate the operator disconnecting mid-challenge
+
+		fetchOK(t, ts, ctx)
+	})
+
+	t.Run("slow backend (deadline exceeded)", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(6 * time.Second) // longer than the 5s fetch timeout
+			w.Header().Set("Content-Type", "text/html")
+			w.Write([]byte("<html></html>")) //nolint:errcheck
+		}))
+		defer ts.Close()
+
+		fetchOK(t, ts, t.Context())
+	})
 }
