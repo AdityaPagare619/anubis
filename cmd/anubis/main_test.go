@@ -1,11 +1,57 @@
 package main
 
 import (
+	"flag"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"testing"
 )
+
+// TestDeprecatedUseSimplifiedExplanationWarning pins when the
+// USE_SIMPLIFIED_EXPLANATION deprecation warning fires: only when the flag
+// was explicitly set (CLI or env), never from its default value.
+func TestDeprecatedUseSimplifiedExplanationWarning(t *testing.T) {
+	// keep the ambient environment from leaking into the test
+	oldEnv, hadEnv := os.LookupEnv("USE_SIMPLIFIED_EXPLANATION")
+	os.Unsetenv("USE_SIMPLIFIED_EXPLANATION") //nolint:errcheck
+	t.Cleanup(func() {
+		if hadEnv {
+			os.Setenv("USE_SIMPLIFIED_EXPLANATION", oldEnv) //nolint:errcheck
+		}
+	})
+
+	strptr := func(s string) *string { return &s }
+
+	for _, tt := range []struct {
+		name   string
+		args   []string
+		envVal *string // set USE_SIMPLIFIED_EXPLANATION in the environment
+		want   bool
+	}{
+		{name: "default (nothing set) does not warn", want: false},
+		{name: "explicit true warns", args: []string{"-use-simplified-explanation=true"}, want: true},
+		{name: "explicit false warns", args: []string{"-use-simplified-explanation=false"}, want: true},
+		{name: "env true warns", envVal: strptr("true"), want: true},
+		{name: "env false warns", envVal: strptr("false"), want: true},
+		{name: "env empty (but present) warns", envVal: strptr(""), want: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.envVal != nil {
+				t.Setenv("USE_SIMPLIFIED_EXPLANATION", *tt.envVal)
+			}
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			fs.Bool("use-simplified-explanation", true, "deprecated")
+			if err := fs.Parse(tt.args); err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if got := deprecatedUseSimplifiedExplanation(fs); got != tt.want {
+				t.Errorf("deprecatedUseSimplifiedExplanation() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestMakeReverseProxy(t *testing.T) {
 	type received struct {

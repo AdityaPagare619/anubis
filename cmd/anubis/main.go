@@ -94,6 +94,26 @@ var (
 	preserveRefererQueryParam = flag.Bool("preserve-referer-query-param", false, "if true, appends the original external Referer host as utm_source/utm_medium query parameters to the post-challenge redirect URL, for analytics tools that rely on document.referrer or UTM tags instead of the HTTP Referer header. See https://github.com/TecharoHQ/anubis/issues/1596")
 )
 
+// deprecatedUseSimplifiedExplanation reports whether the deprecation warning
+// for the USE_SIMPLIFIED_EXPLANATION flag should be emitted. It fires only
+// when the flag was explicitly set, either on the command line (visible via
+// FlagSet.Visit) or through the USE_SIMPLIFIED_EXPLANATION environment
+// variable. The env check needs os.LookupEnv because flagenv applies env
+// values via f.Value.Set, which does not record the flag in FlagSet.Visit.
+func deprecatedUseSimplifiedExplanation(fs *flag.FlagSet) bool {
+	set := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "use-simplified-explanation" {
+			set = true
+		}
+	})
+	if set {
+		return true
+	}
+	_, set = os.LookupEnv("USE_SIMPLIFIED_EXPLANATION")
+	return set
+}
+
 func keyFromHex(value string) (ed25519.PrivateKey, error) {
 	keyBytes, err := hex.DecodeString(value)
 	if err != nil {
@@ -422,7 +442,7 @@ func run(ctx context.Context) {
 	anubis.OriginalRefererCookieName = *cookiePrefix + "-original-referer"
 	anubis.ForcedLanguage = *forcedLanguage
 
-	if *useSimplifiedExplanation {
+	if deprecatedUseSimplifiedExplanation(flag.CommandLine) {
 		lg.WarnContext(ctx, "USE_SIMPLIFIED_EXPLANATION is deprecated and has no effect, the simplified explanation is always used")
 	}
 
