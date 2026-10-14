@@ -1,11 +1,75 @@
 package main
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"testing"
 )
+
+// TestCheckHealthUnixSocket proves that the healthcheck dials the metrics
+// server over its unix socket instead of concatenating the socket path into
+// an http://localhost URL.
+func TestCheckHealthUnixSocket(t *testing.T) {
+	sockPath := filepath.Join(t.TempDir(), "anubis_metrics.sock")
+
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen on unix socket: %v", err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(ln)                  //nolint:errcheck
+	t.Cleanup(func() { srv.Close() }) //nolint:errcheck
+
+	if err := checkHealth("unix", sockPath); err != nil {
+		t.Fatalf("healthcheck over unix socket failed: %v", err)
+	}
+}
+
+// TestCheckHealthTCP pins the existing TCP behavior: host:port concatenation
+// against a plain TCP metrics bind keeps working.
+func TestCheckHealthTCP(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	u, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := checkHealth("tcp", ":"+u.Port()); err != nil {
+		t.Fatalf("healthcheck over tcp failed: %v", err)
+	}
+}
+
+// TestCheckHealthUnhealthy pins that a non-200 from /healthz is still an
+// error on both transports.
+func TestCheckHealthUnhealthy(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer ts.Close()
+
+	u, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := checkHealth("tcp", ":"+u.Port()); err == nil {
+		t.Fatal("expected error for non-200 healthz, got nil")
+	}
+}
 
 func TestMakeReverseProxy(t *testing.T) {
 	type received struct {

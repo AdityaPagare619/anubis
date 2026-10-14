@@ -107,8 +107,27 @@ func keyFromHex(value string) (ed25519.PrivateKey, error) {
 	return ed25519.NewKeyFromSeed(keyBytes), nil
 }
 
-func doHealthCheck() error {
-	resp, err := http.Get("http://localhost" + *metricsBind + "/healthz")
+// checkHealth probes the metrics server's /healthz endpoint. When the
+// metrics server is bound to a unix socket, the check dials the socket
+// directly instead of concatenating the socket path into an http URL.
+func checkHealth(network, addr string) error {
+	target := "http://localhost" + addr + "/healthz"
+	client := http.DefaultClient
+
+	if network == "unix" {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		socketPath := addr
+		// mirror the target/forward path: dial the unix socket, use a
+		// placeholder host since the address lives in the dialer
+		transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+			dialer := net.Dialer{}
+			return dialer.DialContext(ctx, "unix", socketPath)
+		}
+		client = &http.Client{Transport: transport}
+		target = "http://unix/healthz"
+	}
+
+	resp, err := client.Get(target)
 	if err != nil {
 		return fmt.Errorf("failed to fetch metrics: %w", err)
 	}
@@ -119,6 +138,10 @@ func doHealthCheck() error {
 	}
 
 	return nil
+}
+
+func doHealthCheck() error {
+	return checkHealth(*metricsBindNetwork, *metricsBind)
 }
 
 func parseSameSite(s string) http.SameSite {
